@@ -15,6 +15,7 @@ from aiohttp import web
 from openai import AsyncOpenAI
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from gemini_provider import prepare_content_gemini
 
 LOG = logging.getLogger("nexify")
 MAX_BYTES = 20_000_000
@@ -32,6 +33,7 @@ class Settings:
     external_url: str
     model: str
     transcription_model: str
+    provider: str = "openai"
 
     @classmethod
     def from_env(cls):
@@ -49,8 +51,12 @@ class Settings:
         url = required("RENDER_EXTERNAL_URL").rstrip("/")
         if not url.startswith("https://"):
             raise ValueError("RENDER_EXTERNAL_URL must be an HTTPS URL")
-        return cls(required("TELEGRAM_BOT_TOKEN"), owner, allowed, required("OPENAI_API_KEY"), secret, url,
-                   os.getenv("OPENAI_MODEL", "gpt-6.2-astra"), os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-transcribe"))
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        use_gemini = bool(gemini_key and gemini_key != "replace-me")
+        return cls(required("TELEGRAM_BOT_TOKEN"), owner, allowed,
+                   gemini_key if use_gemini else required("OPENAI_API_KEY"), secret, url,
+                   os.getenv("GEMINI_MODEL", "gemini-3.8-flash") if use_gemini else os.getenv("OPENAI_MODEL", "gpt-6.2-astra"),
+                   os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-transcribe"), "gemini" if use_gemini else "openai")
 
 
 def authorized(update, settings):
@@ -184,7 +190,7 @@ def make_package(folder, video, frames, content, transcript, analysis, trends):
 class Nexify:
     def __init__(self, settings):
         self.settings = settings
-        self.client = AsyncOpenAI(api_key=settings.api_key, timeout=120, max_retries=1)
+        self.client = None if settings.provider == "gemini" else AsyncOpenAI(api_key=settings.api_key, timeout=120, max_retries=1)
         self.busy = False
 
     async def start(self, update, context):
@@ -235,7 +241,10 @@ class Nexify:
                 await telegram_file.download_to_drive(custom_path=video)
                 frames, audio = await extract_media(video, folder)
                 await message.reply_text("فریم‌ها آماده‌ان 🎞️ حالا نوبت تحلیل و جست‌وجوی ایده‌های تازه‌ست 🔎")
-                content, transcript, analysis, trends = await prepare_content(self.client, self.settings, frames, audio)
+                if self.settings.provider == "gemini":
+                    content, transcript, analysis, trends = await prepare_content_gemini(self.settings, frames, audio)
+                else:
+                    content, transcript, analysis, trends = await prepare_content(self.client, self.settings, frames, audio)
                 package = make_package(folder, video, frames, content, transcript, analysis, trends)
                 await message.reply_text("بسته آماده شد؛ دارم برای صاحب بات می‌فرستم 📦")
                 with package.open("rb") as f:
