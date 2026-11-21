@@ -103,6 +103,30 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.post.call_count, 3)
         self.assertIn("gemini-3-flash-preview", session.post.call_args.args[0])
 
+    async def test_gemini_timeout_switches_to_fallback(self):
+        timed_out = MagicMock()
+        timed_out.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError())
+        timed_out.__aexit__ = AsyncMock(return_value=None)
+        answer = {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
+        successful = MagicMock()
+        successful.__aenter__ = AsyncMock(return_value=Obj(status=200, json=AsyncMock(return_value=answer)))
+        successful.__aexit__ = AsyncMock(return_value=None)
+        session = Obj(post=MagicMock(side_effect=[timed_out, successful]))
+        result = await gemini_provider._generate(session, "secret", "gemini-primary", [{"text": "test"}])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(session.post.call_count, 2)
+        self.assertIn("gemini-3-flash-preview", session.post.call_args.args[0])
+        self.assertEqual(session.post.call_args.kwargs["timeout"].total, 75)
+
+    async def test_gemini_timeout_on_both_models_reports_unavailable(self):
+        timed_out = MagicMock()
+        timed_out.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError())
+        timed_out.__aexit__ = AsyncMock(return_value=None)
+        session = Obj(post=MagicMock(return_value=timed_out))
+        with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
+            await gemini_provider._generate(session, "secret", "gemini-primary", [{"text": "test"}])
+        self.assertEqual(session.post.call_count, 2)
+
     async def test_gemini_packages_audio_frames_and_headlines(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
