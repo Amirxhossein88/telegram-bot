@@ -1,4 +1,5 @@
 """Gemini free-tier adapter; current headlines are best-effort, not trend rankings."""
+import asyncio
 import base64
 import json
 import re
@@ -18,12 +19,27 @@ def _object(text):
 async def _generate(session, key, model, parts):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise ValueError("Invalid Gemini model name")
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json"}}
-    async with session.post(endpoint, headers={"x-goog-api-key": key}, json=payload) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Gemini API failed (HTTP {response.status}); check key, access and quota")
-        body = await response.json()
+    fallback = "gemini-3-flash-preview"
+    models = [model] if model == fallback else [model, fallback]
+    status = None
+    for candidate_model in models:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent"
+        for attempt in range(2):
+            async with session.post(endpoint, headers={"x-goog-api-key": key}, json=payload) as response:
+                status = response.status
+                if status == 200:
+                    body = await response.json()
+                    break
+            if status not in (502, 503, 504):
+                raise RuntimeError(f"Gemini API failed (HTTP {status}); check key, access and quota")
+            if attempt == 0:
+                await asyncio.sleep(3)
+        else:
+            continue
+        break
+    else:
+        raise RuntimeError(f"Gemini API temporarily unavailable (HTTP {status}) after retries")
     candidates = body.get("candidates") or []
     if not candidates:
         raise ValueError("Gemini returned no answer")
