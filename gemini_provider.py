@@ -23,23 +23,35 @@ async def _generate(session, key, model, parts):
     fallback = "gemini-3-flash-preview"
     models = [model] if model == fallback else [model, fallback]
     status = None
+    last_failure = "service unavailable"
     for candidate_model in models:
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent"
         for attempt in range(2):
-            async with session.post(endpoint, headers={"x-goog-api-key": key}, json=payload) as response:
-                status = response.status
-                if status == 200:
-                    body = await response.json()
-                    break
-            if status not in (502, 503, 504):
-                raise RuntimeError(f"Gemini API failed (HTTP {status}); check key, access and quota")
+            try:
+                async with session.post(
+                    endpoint, headers={"x-goog-api-key": key}, json=payload,
+                    timeout=ClientTimeout(total=75),
+                ) as response:
+                    status = response.status
+                    if status == 200:
+                        body = await response.json()
+                        break
+                if status not in (502, 503, 504):
+                    raise RuntimeError(f"Gemini API failed (HTTP {status}); check key, access and quota")
+                last_failure = f"HTTP {status}"
+            except (asyncio.TimeoutError, ClientError):
+                # A stalled network request must not skip the fallback model.
+                status = None
+                last_failure = "timeout or connection error"
+                break
             if attempt == 0:
                 await asyncio.sleep(3)
         else:
             continue
-        break
+        if status == 200:
+            break
     else:
-        raise RuntimeError(f"Gemini API temporarily unavailable (HTTP {status}) after retries")
+        raise RuntimeError(f"Gemini API temporarily unavailable ({last_failure}) after retries")
     candidates = body.get("candidates") or []
     if not candidates:
         raise ValueError("Gemini returned no answer")
