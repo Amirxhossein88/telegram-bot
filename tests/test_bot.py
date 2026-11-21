@@ -116,6 +116,16 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
             gap.images.generate.assert_awaited_once()
             self.assertEqual(session.post.call_count, 1)
 
+    async def test_composition_error_does_not_trigger_cloudflare(self):
+        image = base64.b64encode(b"image bytes").decode()
+        gap = Obj(images=Obj(generate=AsyncMock(return_value=Obj(data=[Obj(b64_json=image)]))))
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(cover_provider, "compose_cover", side_effect=ValueError("bad title")), \
+             patch.object(cover_provider, "ClientSession") as cloudflare:
+            with self.assertRaisesRegex(ValueError, "bad title"):
+                await cover_provider.generate_cover(Path(temp), "technology", "موضوع", gap_client=gap)
+            cloudflare.assert_not_called()
+
     async def test_gapgpt_analysis_and_caption(self):
         first = Obj(choices=[Obj(message=Obj(content=json.dumps({"analysis": "analysis", "search_terms": "topic"})))])
         data = {"caption": "caption #tag", "cover_prompt": "relevant image", "headline": "موضوع"}
@@ -141,6 +151,15 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
             with Image.open(result) as image:
                 self.assertEqual(image.size, (1080, 1920))
                 self.assertGreater(image.crop((100, 320, 980, 600)).convert("L").getextrema()[1], 200)
+
+    async def test_cover_accepts_long_persian_subtitle_and_unbroken_word(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "background.png"
+            result = Path(temp) / "cover.jpg"
+            Image.new("RGB", (768, 1344), "#321060").save(source)
+            cover_design.compose_cover(source, result, "برنامه نویسی", "آموزش " + "خیلی" * 100)
+            with Image.open(result) as image:
+                self.assertEqual(image.size, (1080, 1920))
 
     async def test_gemini_retries_service_unavailable_and_uses_fallback(self):
         def response(status, data=None):
