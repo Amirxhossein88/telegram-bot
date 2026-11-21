@@ -284,6 +284,7 @@ async def run():
     server.router.add_get("/health", health)
     server.router.add_post("/telegram", webhook)
     await app.initialize()
+    LOG.info("Telegram bot username: @%s", app.bot.username)
     await app.start()
     await app.bot.set_webhook(url=settings.external_url + "/telegram", secret_token=settings.webhook_secret,
                               allowed_updates=["message"], drop_pending_updates=False)
@@ -302,4 +303,6 @@ async def run():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # HTTPX logs request URLs, and Telegram embeds the bot token in those URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     asyncio.run(run())
