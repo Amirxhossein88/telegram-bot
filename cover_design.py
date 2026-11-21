@@ -29,9 +29,17 @@ def _lines(draw, text, font, width, max_lines):
             line = candidate
     if line:
         lines.append(line)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip(' .،') + "…"
+    truncated = len(lines) > max_lines
+    lines = lines[:max_lines]
+    for i, line in enumerate(lines):
+        ellipsis = truncated and i == len(lines) - 1
+        if draw.textlength(_visual(line), font=font) > width:
+            ellipsis = True
+        if ellipsis:
+            line = line.rstrip(' .،')
+            while line and draw.textlength(_visual(line + "…"), font=font) > width:
+                line = line[:-1].rstrip()
+            lines[i] = line + "…"
     return lines
 
 

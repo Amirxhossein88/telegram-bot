@@ -43,21 +43,33 @@ async def generate_cover(folder, prompt, headline, subtitle="", gap_client=None)
             raw = base64.b64decode(encoded, validate=True)
             source = folder / "gap-background.png"
             source.write_bytes(raw)
-            return compose_cover(source, folder / "generated-cover.jpg", headline, subtitle)
         except Exception as exc:
-            LOG.warning("GapGPT cover failed (%s); trying Cloudflare", type(exc).__name__)
+            LOG.warning("GapGPT image request or decoding failed (%s); trying Cloudflare", type(exc).__name__)
+        else:
+            # Composition is independent of the provider; do not request another image if it fails.
+            return compose_cover(source, folder / "generated-cover.jpg", headline, subtitle)
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
     if not re.fullmatch(r"[a-fA-F0-9]{32}", account) or not token:
         raise CoverConfigurationError("Cloudflare Workers AI credentials are not configured")
     form = FormData()
-    form.add_field("prompt", cover_prompt(prompt), content_type="text/plain")
+    form.add_field("prompt", ("Premium vertical futuristic tech cover. Deep black and neon purple, "
+                              "one clear topic-related visual in lower half, dark empty upper half. "
+                              "Uncluttered, no text or logos. Subject: " + prompt.strip()[:300]),
+                   content_type="text/plain")
     form.add_field("width", "768")
     form.add_field("height", "1344")
     endpoint = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/black-forest-labs/flux-2-klein-4b"
     async with ClientSession(timeout=ClientTimeout(total=150)) as session:
         async with session.post(endpoint, headers={"Authorization": "Bearer " + token}, data=form) as response:
             if response.status != 200:
+                try:
+                    detail = await response.json(content_type=None)
+                    codes = [item.get("code") for item in detail.get("errors", [])
+                             if isinstance(item, dict) and isinstance(item.get("code"), int)]
+                except (ValueError, TypeError, AttributeError):
+                    codes = []
+                LOG.error("Cloudflare cover failed: HTTP %s, error codes %s", response.status, codes[:5])
                 raise RuntimeError(f"Cover generation failed (HTTP {response.status})")
             chunks = bytearray()
             async for chunk in response.content.iter_chunked(65536):
