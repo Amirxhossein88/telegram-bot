@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import bot
 import gemini_provider
 import cover_provider
+import cover_design
+import gapgpt_provider
+from PIL import Image
 
 
 class CoreTests(unittest.TestCase):
@@ -65,7 +68,7 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_cover_requires_config(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(cover_provider.CoverConfigurationError):
-                await cover_provider.generate_cover(Path(temp), "landscape")
+                await cover_provider.generate_cover(Path(temp), "landscape", "موضوع ویدیو")
 
     async def test_cover_uses_generated_image_response(self):
         image = b"\x89PNG\r\n\x1a\n" + b"generated-image"
@@ -83,11 +86,61 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
         session.post.return_value = request
         env = {"CLOUDFLARE_ACCOUNT_ID": "a" * 32, "CLOUDFLARE_API_TOKEN": "test-token"}
         with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", env), \
-             patch.object(cover_provider, "ClientSession", return_value=session):
-            cover = await cover_provider.generate_cover(Path(temp), "a landscape")
+             patch.object(cover_provider, "ClientSession", return_value=session), \
+             patch.object(cover_provider, "compose_cover", side_effect=lambda source, output, headline, subtitle: source):
+            cover = await cover_provider.generate_cover(Path(temp), "a landscape", "موضوع ویدیو")
             self.assertEqual(cover.read_bytes(), image)
-            self.assertEqual(cover.suffix, ".png")
             self.assertIn("flux-2-klein-4b", session.post.call_args.args[0])
+
+    async def test_gap_cover_failure_uses_cloudflare(self):
+        image = b"\x89PNG\r\n\x1a\n" + b"image"
+        payload = json.dumps({"success": True, "result": {"image": base64.b64encode(image).decode()}}).encode()
+        class Stream:
+            async def iter_chunked(self, size):
+                yield payload
+        response = Obj(status=200, content=Stream())
+        request = MagicMock()
+        request.__aenter__ = AsyncMock(return_value=response)
+        request.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.post.return_value = request
+        gap = Obj(images=Obj(generate=AsyncMock(side_effect=RuntimeError("unavailable"))))
+        env = {"CLOUDFLARE_ACCOUNT_ID": "a" * 32, "CLOUDFLARE_API_TOKEN": "test-token"}
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", env), \
+             patch.object(cover_provider, "ClientSession", return_value=session), \
+             patch.object(cover_provider, "compose_cover", side_effect=lambda source, output, headline, subtitle: source):
+            result = await cover_provider.generate_cover(Path(temp), "technology", "موضوع ویدیو", gap_client=gap)
+            self.assertEqual(result.read_bytes(), image)
+            gap.images.generate.assert_awaited_once()
+            self.assertEqual(session.post.call_count, 1)
+
+    async def test_gapgpt_analysis_and_caption(self):
+        first = Obj(choices=[Obj(message=Obj(content=json.dumps({"analysis": "analysis", "search_terms": "topic"})))])
+        data = {"caption": "caption #tag", "cover_prompt": "relevant image", "headline": "موضوع"}
+        second = Obj(choices=[Obj(message=Obj(content=json.dumps(data)))])
+        create = AsyncMock(side_effect=[first, second])
+        client = Obj(chat=Obj(completions=Obj(create=create)))
+        settings = Obj(gap_text_model="test-vision", gap_transcription_model="whisper")
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(gapgpt_provider, "_headlines", new_callable=AsyncMock, return_value="news"):
+            frame = Path(temp) / "frame.jpg"
+            frame.write_bytes(b"image")
+            result = await gapgpt_provider.prepare_content_gapgpt(client, settings, [frame], None)
+            self.assertEqual(result[0], data)
+            self.assertEqual(create.await_count, 2)
+            self.assertEqual(create.call_args_list[0].kwargs["messages"][0]["content"][1]["type"], "image_url")
+
+    async def test_cover_is_vertical_with_exact_logo_and_persian_title(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "background.png"
+            result = Path(temp) / "cover.jpg"
+            Image.new("RGB", (768, 1344), "#321060").save(source)
+            cover_design.compose_cover(source, result, "برنامه نویسی با هوش مصنوعی", "آموزش ساده")
+            with Image.open(result) as image:
+                self.assertEqual(image.size, (1080, 1920))
+                self.assertGreater(image.crop((100, 320, 980, 600)).convert("L").getextrema()[1], 200)
 
     async def test_gemini_retries_service_unavailable_and_uses_fallback(self):
         def response(status, data=None):
@@ -137,7 +190,7 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
                 frames.append(frame)
             audio = folder / "audio.mp3"
             audio.write_bytes(b"audio")
-            content = dict(caption="caption #tag", cover_prompt="vertical creative cover")
+            content = dict(caption="caption #tag", cover_prompt="vertical creative cover", headline="موضوع ویدیو")
             answers = [dict(analysis="analysis", transcript="speech", search_terms="topic"), content]
             with patch.object(gemini_provider, "_generate", new_callable=AsyncMock, side_effect=answers) as generate, \
                  patch.object(gemini_provider, "_headlines", new_callable=AsyncMock, return_value="current headlines"):
@@ -166,7 +219,7 @@ class AsyncCoreTests(unittest.IsolatedAsyncioTestCase):
                 frames.append(frame)
             audio = folder / "audio.mp3"
             audio.write_bytes(b"audio")
-            data = dict(caption="caption #tag", cover_prompt="vertical cover")
+            data = dict(caption="caption #tag", cover_prompt="vertical cover", headline="موضوع ویدیو")
             research = Obj(output=[Obj(type="message", content=[Obj(type="output_text", text="research", annotations=[])])])
             create = AsyncMock(side_effect=[Obj(output_text="visual analysis"), research, Obj(output_text=json.dumps(data))])
             transcribe = AsyncMock(return_value=Obj(text="spoken text"))
